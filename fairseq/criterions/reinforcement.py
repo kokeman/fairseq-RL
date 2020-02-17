@@ -23,7 +23,7 @@ class ReinforcementCriterion(FairseqCriterion):
         self.n_sample = args.criterion_sample_size
         self.pad = task.tgt_dict.pad()
         self.sample_gen = SequenceGenerator(task.tgt_dict, beam_size=args.criterion_sample_size, retain_dropout=True)
-        self.greedy_gen = SequenceGenerator(task.tgt_dict, beam_size=1, retain_dropout=True)
+        self.greedy_gen = SequenceGenerator(task.tgt_dict, beam_size=1, retain_dropout=False)
         self.scorer = bleu.Scorer(task.tgt_dict.pad(), task.tgt_dict.eos(), task.tgt_dict.unk())
 
     def forward(self, model, sample, reduce=True):
