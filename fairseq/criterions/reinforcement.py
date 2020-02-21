@@ -22,7 +22,7 @@ class ReinforcementCriterion(FairseqCriterion):
         super().__init__(args, task)
         self.n_sample = args.criterion_sample_size
         self.pad = task.tgt_dict.pad()
-        self.sample_gen = SequenceGenerator(task.tgt_dict, beam_size=args.criterion_sample_size, retain_dropout=True)
+        self.sample_gen = SequenceGenerator(task.tgt_dict, beam_size=self.n_sample, retain_dropout=True)
         self.greedy_gen = SequenceGenerator(task.tgt_dict, beam_size=1, retain_dropout=False)
         self.scorer = bleu.Scorer(task.tgt_dict.pad(), task.tgt_dict.eos(), task.tgt_dict.unk())
 
@@ -81,7 +81,7 @@ class ReinforcementCriterion(FairseqCriterion):
 
             prev_output_tokens = torch.cat([bos, output_tokens], dim=-1)
             net_output = model.decoder(prev_output_tokens, encoder_out=encoder_out)
-            
+
             lprobs = model.get_normalized_probs(net_output, log_probs=True)[:, :-1, :]
             lprobs = lprobs.reshape(-1, lprobs.size(-1))
             lprobs = lprobs[range(lprobs.size(0)), output_tokens.reshape(-1)]
@@ -89,11 +89,11 @@ class ReinforcementCriterion(FairseqCriterion):
             lprobs = lprobs.sum(dim=-1, keepdim=True)
 
             scores.append(lprobs)
-        
+
         scores = torch.cat(scores, dim=-1)
         r_d = r_d.to(scores.device)
 
-        loss = ((scores * r_d) / self.n_sample).sum()
+        loss = -1.0 * (((scores * r_d) / self.n_sample).sum())
 
         return loss, loss
 
