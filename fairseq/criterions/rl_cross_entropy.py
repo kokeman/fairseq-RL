@@ -15,14 +15,15 @@ from fairseq.criterions import FairseqCriterion, register_criterion
 from fairseq.sequence_generator import SequenceGenerator
 from fairseq import bleu
 
-@register_criterion('reinforcement')
-class ReinforcementCriterion(FairseqCriterion):
+@register_criterion('rl_ce_combination')
+class RLCrossEntropyCriterion(FairseqCriterion):
 
     def __init__(self, args, task):
         super().__init__(args, task)
         self.n_sample = args.criterion_sample_size
+        self.ce_weight = args.ce_weight
         self.pad = task.tgt_dict.pad()
-        self.sample_gen = SequenceGenerator(task.tgt_dict, beam_size=args.criterion_sample_size, retain_dropout=True)
+        self.sample_gen = SequenceGenerator(task.tgt_dict, beam_size=self.n_sample, retain_dropout=True)
         self.greedy_gen = SequenceGenerator(task.tgt_dict, beam_size=1, retain_dropout=False)
         self.scorer = bleu.Scorer(task.tgt_dict.pad(), task.tgt_dict.eos(), task.tgt_dict.unk())
 
@@ -49,7 +50,7 @@ class ReinforcementCriterion(FairseqCriterion):
     def add_args(parser):
         """Add criterion-specific arguments to the parser."""
         parser.add_argument('--criterion-sample-size', type=int, default=5, help='Number of sample size (default: 5)')
-        parser.add_argument('--rl_weight', type=float, default=0.8, help='Weight of rl loss (default: 0.8)')
+        parser.add_argument('--ce_weight', type=float, default=0.1, help='Weight of cross entropy loss (default: 0.1)')
 
     def reword(self, ref, pred):
         self.scorer.reset(one_init=True)
@@ -57,10 +58,10 @@ class ReinforcementCriterion(FairseqCriterion):
         return self.scorer.score()
 
     def compute_loss(self, model, net_output, sample, reduce=True):
-        rl_loss, _ = self.conpute_rl_loss(model, net_output, sample, reduce=reduce)
-        ce_loss, _ = self.conpute_rl_loss(model, net_output, sample, reduce=reduce)
+        ce_loss, _ = self.compute_ce_loss(model, net_output, sample, reduce=reduce)
+        rl_loss, _ = self.compute_rl_loss(model, net_output, sample, reduce=reduce)
 
-        loss = (1 - self.args.rl_weight) * ce_loss + self.args.rl_weight * rl_loss
+        loss = self.ce_weight * ce_loss + (1.0 - self.ce_weight) * rl_loss
 
         return loss, loss
 
@@ -102,7 +103,7 @@ class ReinforcementCriterion(FairseqCriterion):
         scores = torch.cat(scores, dim=-1)
         r_d = r_d.to(scores.device)
 
-        loss = ((scores * r_d) / self.n_sample).sum()
+        loss = -1.0 * (((scores * r_d) / self.n_sample).sum())
 
         return loss, loss
 
