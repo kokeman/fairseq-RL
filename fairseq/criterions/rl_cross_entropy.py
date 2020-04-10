@@ -9,7 +9,7 @@ import torch
 import torch.nn.functional as F
 import torch.nn.utils.rnn as rnn_utils
 
-from fairseq import metrics, utils
+from fairseq import metrics, utils, search
 from fairseq.criterions import FairseqCriterion, register_criterion
 
 from fairseq.sequence_generator import SequenceGenerator
@@ -23,7 +23,8 @@ class RLCrossEntropyCriterion(FairseqCriterion):
         self.n_sample = args.criterion_sample_size
         self.ce_weight = args.ce_weight
         self.pad = task.tgt_dict.pad()
-        self.sample_gen = SequenceGenerator(task.tgt_dict, beam_size=self.n_sample, retain_dropout=True)
+        self.sample_gen = SequenceGenerator(task.tgt_dict, beam_size=self.n_sample, retain_dropout=True,
+                                            search_strategy=search.Sampling(task.tgt_dict))
         self.greedy_gen = SequenceGenerator(task.tgt_dict, beam_size=1, retain_dropout=False)
         self.scorer = bleu.Scorer(task.tgt_dict.pad(), task.tgt_dict.eos(), task.tgt_dict.unk())
 
@@ -50,7 +51,9 @@ class RLCrossEntropyCriterion(FairseqCriterion):
     def add_args(parser):
         """Add criterion-specific arguments to the parser."""
         parser.add_argument('--criterion-sample-size', type=int, default=5, help='Number of sample size (default: 5)')
-        parser.add_argument('--ce_weight', type=float, default=0.1, help='Weight of cross entropy loss (default: 0.1)')
+        parser.add_argument('--ce-weight', type=float, default=0.1, help='Weight of cross entropy loss (default: 0.1)')
+        parser.add_argument('--baseline-reward', default="average", help='The method of baseline reward (average or self-critic)')
+        parser.add_argument('--reward-clipping', action='store_true', default=False, help='if rewad is negative, reward is set to 0')
 
     def reword(self, ref, pred):
         self.scorer.reset(one_init=True)
@@ -67,14 +70,22 @@ class RLCrossEntropyCriterion(FairseqCriterion):
 
     def compute_rl_loss(self, model, net_output, sample, reduce=True):
         # Generate baseline/samples
-        y_g = self.greedy_gen.generate([model], sample)
         y_hat = self.sample_gen.generate([model], sample)
         ref = sample['target']
 
         # rewords
-        r_g = torch.tensor([self.reword(ref_i, y_g_i[0]['tokens']) for ref_i, y_g_i in zip(ref, y_g)])
         r_hat = torch.tensor([[self.reword(ref_i, y_hat_i_n['tokens']) for y_hat_i_n in y_hat_i] for ref_i, y_hat_i in zip(ref, y_hat)])
-        r_d = r_hat - r_g.unsqueeze(-1)
+
+        if self.args.baseline_reward == "average":
+            r_b = r_hat.mean(1, True)
+        elif self.args.baseline_reward == "self-critic":
+            y_g = self.greedy_gen.generate([model], sample)
+            r_b = torch.tensor([self.reword(ref_i, y_g_i[0]['tokens']) for ref_i, y_g_i in zip(ref, y_g)]).unsqueeze(-1)
+
+        r_d = r_hat - r_b
+
+        if self.args.reward_clipping:
+            r_d[r_d < 0] = 0
 
         # scores
         net_input = {
@@ -92,18 +103,18 @@ class RLCrossEntropyCriterion(FairseqCriterion):
             prev_output_tokens = torch.cat([bos, output_tokens], dim=-1)
             net_output = model.decoder(prev_output_tokens, encoder_out=encoder_out)
 
-            lprobs = model.get_normalized_probs(net_output, log_probs=True)[:, :-1, :]
-            lprobs = lprobs.reshape(-1, lprobs.size(-1))
-            lprobs = lprobs[range(lprobs.size(0)), output_tokens.reshape(-1)]
-            lprobs = lprobs.reshape(output_tokens.size())
-            lprobs = lprobs.sum(dim=-1, keepdim=True)
+            lprobs = model.get_normalized_probs(net_output, log_probs=True)[:, :-1, :]  # (batch_size, length, vocab_size)
+            lprobs = lprobs.reshape(-1, lprobs.size(-1))  # (batch_size * length, vocab_size)
+            lprobs = lprobs[range(lprobs.size(0)), output_tokens.reshape(-1)]  # (batch_size * length)
+            lprobs = lprobs.reshape(output_tokens.size())  # (batch_size, length)
+            lprobs = lprobs.sum(dim=-1, keepdim=True)  # (batch_size, 1)
 
             scores.append(lprobs)
 
-        scores = torch.cat(scores, dim=-1)
-        r_d = r_d.to(scores.device)
+        scores = torch.cat(scores, dim=-1)  # (batch_size, sample_size)
+        r_d = r_d.to(scores.device)  # (batch_size, sample_size)
 
-        loss = -1.0 * (((scores * r_d) / self.n_sample).sum())
+        loss = ((-scores * r_d) / self.n_sample).sum()
 
         return loss, loss
 
