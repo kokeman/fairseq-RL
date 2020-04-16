@@ -59,11 +59,12 @@ class SacrebleuScorer(object):
 
 
 class Scorer(object):
-    def __init__(self, pad, eos, unk):
+    def __init__(self, pad, eos, unk, sent=False):
         self.stat = BleuStat()
         self.pad = pad
         self.eos = eos
         self.unk = unk
+        self.sent = sent
         self.reset()
 
     def reset(self, one_init=False):
@@ -100,7 +101,8 @@ class Scorer(object):
     def score(self, order=4):
         psum = sum(math.log(p) if p > 0 else float('-Inf')
                    for p in self.precision()[:order])
-        return self.brevity() * math.exp(psum / order) * 100
+        return self.brevity() * math.exp(psum / order) * 100 if not self.sent \
+            else self.brevity() * math.exp(psum / order)
 
     def precision(self):
         def ratio(a, b):

@@ -23,10 +23,10 @@ class RLCrossEntropyCriterion(FairseqCriterion):
         self.n_sample = args.criterion_sample_size
         self.ce_weight = args.ce_weight
         self.pad = task.tgt_dict.pad()
-        self.sample_gen = SequenceGenerator(task.tgt_dict, beam_size=self.n_sample, retain_dropout=True,
-                                            search_strategy=search.Sampling(task.tgt_dict))
+        search_strategy = search.Sampling(task.tgt_dict) if args.search_strategy == "sampling" else None
+        self.sample_gen = SequenceGenerator(task.tgt_dict, beam_size=self.n_sample, retain_dropout=True, search_strategy=search_strategy)
         self.greedy_gen = SequenceGenerator(task.tgt_dict, beam_size=1, retain_dropout=False)
-        self.scorer = bleu.Scorer(task.tgt_dict.pad(), task.tgt_dict.eos(), task.tgt_dict.unk())
+        self.scorer = bleu.Scorer(task.tgt_dict.pad(), task.tgt_dict.eos(), task.tgt_dict.unk(), args.sent_bleu)
 
     def forward(self, model, sample, reduce=True):
         """Compute the loss for the given sample.
@@ -37,9 +37,11 @@ class RLCrossEntropyCriterion(FairseqCriterion):
         3) logging outputs to display while training
         """
         net_output = model(**sample['net_input'])
-        loss, _ = self.compute_loss(model, net_output, sample, reduce=reduce)
+        loss, reward = self.compute_loss(model, net_output, sample, reduce=reduce)
         sample_size = sample['target'].size(0) if self.args.sentence_avg else sample['ntokens']
         logging_output = {
+            'reward': reward[0],
+            'baseline_reward': reward[1],
             'loss': loss.data,
             'ntokens': sample['ntokens'],
             'nsentences': sample['target'].size(0),
@@ -54,6 +56,8 @@ class RLCrossEntropyCriterion(FairseqCriterion):
         parser.add_argument('--ce-weight', type=float, default=0.1, help='Weight of cross entropy loss (default: 0.1)')
         parser.add_argument('--baseline-reward', default="average", help='The method of baseline reward (average or self-critic)')
         parser.add_argument('--reward-clipping', action='store_true', default=False, help='if rewad is negative, reward is set to 0')
+        parser.add_argument('--sent-bleu', action='store_true', default=False, help='if true, the reward bleu is normalized 0 ~ 1')
+        parser.add_argument('--search-strategy', default="beam", help='sampling strategy (sampling or beam)')
 
     def reword(self, ref, pred):
         self.scorer.reset(one_init=True)
@@ -62,11 +66,11 @@ class RLCrossEntropyCriterion(FairseqCriterion):
 
     def compute_loss(self, model, net_output, sample, reduce=True):
         ce_loss, _ = self.compute_ce_loss(model, net_output, sample, reduce=reduce)
-        rl_loss, _ = self.compute_rl_loss(model, net_output, sample, reduce=reduce)
+        rl_loss, reward = self.compute_rl_loss(model, net_output, sample, reduce=reduce)
 
         loss = self.ce_weight * ce_loss + (1.0 - self.ce_weight) * rl_loss
 
-        return loss, loss
+        return loss, reward
 
     def compute_rl_loss(self, model, net_output, sample, reduce=True):
         # Generate baseline/samples
@@ -116,7 +120,7 @@ class RLCrossEntropyCriterion(FairseqCriterion):
 
         loss = ((-scores * r_d) / self.n_sample).sum()
 
-        return loss, loss
+        return loss, [r_hat.mean(), r_b.mean()]
 
     def compute_ce_loss(self, model, net_output, sample, reduce=True):
         lprobs = model.get_normalized_probs(net_output, log_probs=True)
@@ -134,10 +138,13 @@ class RLCrossEntropyCriterion(FairseqCriterion):
     def reduce_metrics(logging_outputs) -> None:
         """Aggregate logging outputs from data parallel training."""
         loss_sum = utils.item(sum(log.get('loss', 0) for log in logging_outputs))
+        reward_sum = utils.item(sum(log.get('reward', 0) for log in logging_outputs))
         ntokens = utils.item(sum(log.get('ntokens', 0) for log in logging_outputs))
         sample_size = utils.item(sum(log.get('sample_size', 0) for log in logging_outputs))
+        n_sentences = utils.item(sum(log.get('nsentences', 0) for log in logging_outputs))
 
         metrics.log_scalar('loss', loss_sum / sample_size / math.log(2), sample_size, round=3)
+        metrics.log_scalar('reward', reward_sum, round=3)
         if sample_size != ntokens:
             metrics.log_scalar('nll_loss', loss_sum / ntokens / math.log(2), ntokens, round=3)
             metrics.log_derived('ppl', lambda meters: utils.get_perplexity(meters['nll_loss'].avg))
