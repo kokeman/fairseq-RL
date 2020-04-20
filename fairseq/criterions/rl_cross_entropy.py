@@ -42,12 +42,14 @@ class RLCrossEntropyCriterion(FairseqCriterion):
         logging_output = {
             'reward': reward[0],
             'baseline_reward': reward[1],
-            'loss': loss.data,
+            'loss': loss[0].data,
+            'ce_loss': loss[1].data,
+            'rl_loss': loss[2].data,
             'ntokens': sample['ntokens'],
             'nsentences': sample['target'].size(0),
             'sample_size': sample_size,
         }
-        return loss, sample_size, logging_output
+        return loss[0], sample_size, logging_output
 
     @staticmethod
     def add_args(parser):
@@ -70,7 +72,7 @@ class RLCrossEntropyCriterion(FairseqCriterion):
 
         loss = self.ce_weight * ce_loss + (1.0 - self.ce_weight) * rl_loss
 
-        return loss, reward
+        return [loss, ce_loss, rl_loss], reward
 
     def compute_rl_loss(self, model, net_output, sample, reduce=True):
         # Generate baseline/samples
@@ -138,13 +140,19 @@ class RLCrossEntropyCriterion(FairseqCriterion):
     def reduce_metrics(logging_outputs) -> None:
         """Aggregate logging outputs from data parallel training."""
         loss_sum = utils.item(sum(log.get('loss', 0) for log in logging_outputs))
+        ce_loss_sum = utils.item(sum(log.get('ce_loss', 0) for log in logging_outputs))
+        rl_loss_sum = utils.item(sum(log.get('rl_loss', 0) for log in logging_outputs))
         reward_sum = utils.item(sum(log.get('reward', 0) for log in logging_outputs))
+        baseline_reward_sum = utils.item(sum(log.get('baseline_reward', 0) for log in logging_outputs))
         ntokens = utils.item(sum(log.get('ntokens', 0) for log in logging_outputs))
         sample_size = utils.item(sum(log.get('sample_size', 0) for log in logging_outputs))
         n_sentences = utils.item(sum(log.get('nsentences', 0) for log in logging_outputs))
 
         metrics.log_scalar('loss', loss_sum / sample_size / math.log(2), sample_size, round=3)
+        metrics.log_scalar('ce_loss', ce_loss_sum / sample_size / math.log(2), sample_size, round=3)
+        metrics.log_scalar('rl_loss', rl_loss_sum / sample_size / math.log(2), sample_size, round=3)
         metrics.log_scalar('reward', reward_sum, round=3)
+        metrics.log_scalar('baseline_reward', baseline_reward_sum, round=3)
         if sample_size != ntokens:
             metrics.log_scalar('nll_loss', loss_sum / ntokens / math.log(2), ntokens, round=3)
             metrics.log_derived('ppl', lambda meters: utils.get_perplexity(meters['nll_loss'].avg))
