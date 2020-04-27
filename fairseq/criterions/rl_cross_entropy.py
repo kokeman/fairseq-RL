@@ -24,7 +24,7 @@ class RLCrossEntropyCriterion(FairseqCriterion):
         self.ce_weight = args.ce_weight
         self.pad = task.tgt_dict.pad()
         search_strategy = search.Sampling(task.tgt_dict) if args.search_strategy == "sampling" else None
-        self.sample_gen = SequenceGenerator(task.tgt_dict, beam_size=self.n_sample, retain_dropout=True, search_strategy=search_strategy)
+        self.sample_gen = SequenceGenerator(task.tgt_dict, beam_size=self.n_sample, retain_dropout=False, search_strategy=search_strategy)
         self.greedy_gen = SequenceGenerator(task.tgt_dict, beam_size=1, retain_dropout=False)
         self.scorer = bleu.Scorer(task.tgt_dict.pad(), task.tgt_dict.eos(), task.tgt_dict.unk(), args.sent_bleu)
 
@@ -60,6 +60,10 @@ class RLCrossEntropyCriterion(FairseqCriterion):
         parser.add_argument('--reward-clipping', action='store_true', default=False, help='if rewad is negative, reward is set to 0')
         parser.add_argument('--sent-bleu', action='store_true', default=False, help='if true, the reward bleu is normalized 0 ~ 1')
         parser.add_argument('--search-strategy', default="beam", help='sampling strategy (sampling or beam)')
+        parser.add_argument('--mixier', action='store_true', default=False, 
+                                help='Linearly reduce the ce-weight from --ce-weith to --min-ce-weight')
+        parser.add_argument('--min-ce-weight', type=float, default=0.03)
+        parser.add_argument('--rl-epoch-num', type=int, default=10, help="epoch num on rl")
 
     def reword(self, ref, pred):
         self.scorer.reset(one_init=True)
@@ -70,7 +74,14 @@ class RLCrossEntropyCriterion(FairseqCriterion):
         ce_loss, _ = self.compute_ce_loss(model, net_output, sample, reduce=reduce)
         rl_loss, reward = self.compute_rl_loss(model, net_output, sample, reduce=reduce)
 
-        loss = self.ce_weight * ce_loss + (1.0 - self.ce_weight) * rl_loss
+        if self.args.mixier:
+            epoch = metrics.get_meter("global", "epoch").val
+            alpha = epoch * (self.args.min_ce_weight - self.args.ce_weight) / (self.args.rl_epoch_num - 1) + self.args.ce_weight
+        else:
+            alpha = self.ce_weight
+        metrics.log_scalar('alpha', alpha)
+
+        loss = alpha * ce_loss + (1.0 - alpha) * rl_loss
 
         return [loss, ce_loss, rl_loss], reward
 
@@ -146,7 +157,6 @@ class RLCrossEntropyCriterion(FairseqCriterion):
         baseline_reward_sum = utils.item(sum(log.get('baseline_reward', 0) for log in logging_outputs))
         ntokens = utils.item(sum(log.get('ntokens', 0) for log in logging_outputs))
         sample_size = utils.item(sum(log.get('sample_size', 0) for log in logging_outputs))
-        n_sentences = utils.item(sum(log.get('nsentences', 0) for log in logging_outputs))
 
         metrics.log_scalar('loss', loss_sum / sample_size / math.log(2), sample_size, round=3)
         metrics.log_scalar('ce_loss', ce_loss_sum / sample_size / math.log(2), sample_size, round=3)

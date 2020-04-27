@@ -32,7 +32,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger('fairseq_cli.train')
 
-
+@metrics.aggregate('global')
 def main(args, init_distributed=False):
     utils.import_user_module(args)
 
@@ -82,6 +82,9 @@ def main(args, init_distributed=False):
     # corresponding train iterator
     extra_state, epoch_itr = checkpoint_utils.load_checkpoint(args, trainer)
 
+    if args.mixier:
+        assert args.max_epoch - epoch_itr.epoch == args.rl_epoch_num - 1
+
     # Train until the learning rate gets too small
     max_epoch = args.max_epoch or math.inf
     max_update = args.max_update or math.inf
@@ -98,6 +101,14 @@ def main(args, init_distributed=False):
         )
         and trainer.get_num_updates() < max_update
     ):
+
+        # log epoch from 0
+        if metrics.get_meter("global", "epoch") is None:
+            epoch = 0
+        else:
+            epoch = metrics.get_meter("global", "epoch").val + 1
+        metrics.log_scalar("epoch", epoch)
+
         # train for one epoch
         train(args, trainer, task, epoch_itr)
 
