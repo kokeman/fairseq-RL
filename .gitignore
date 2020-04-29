@@ -130,3 +130,8 @@ data-bin/
 
 # Experimental Folder
 experimental/*
+
+# custome
+checkpoints/
+log*
+results/
