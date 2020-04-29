@@ -18,7 +18,7 @@ from fairseq import bleu, bert
 from mosestokenizer import MosesDetokenizer
 
 @register_criterion('rl_bert')
-class RLCrossEntropyCriterion(FairseqCriterion):
+class RLBertCriterion(FairseqCriterion):
 
     def __init__(self, args, task):
         super().__init__(args, task)
@@ -26,9 +26,8 @@ class RLCrossEntropyCriterion(FairseqCriterion):
         self.ce_weight = args.ce_weight
         self.pad = task.tgt_dict.pad()
         search_strategy = search.Sampling(task.tgt_dict) if args.search_strategy == "sampling" else None
-        self.sample_gen = SequenceGenerator(task.tgt_dict, beam_size=self.n_sample, retain_dropout=False, search_strategy=search_strategy)
+        self.sample_gen = SequenceGenerator(task.tgt_dict, beam_size=self.n_sample, retain_dropout=True, search_strategy=search_strategy)
         self.greedy_gen = SequenceGenerator(task.tgt_dict, beam_size=1, retain_dropout=False)
-        # self.scorer = bleu.Scorer(task.tgt_dict.pad(), task.tgt_dict.eos(), task.tgt_dict.unk(), args.sent_bleu)
         self.scorer = bert.Scorer(args)
 
     def forward(self, model, sample, reduce=True):
@@ -40,19 +39,17 @@ class RLCrossEntropyCriterion(FairseqCriterion):
         3) logging outputs to display while training
         """
         net_output = model(**sample['net_input'])
-        loss, reward = self.compute_loss(model, net_output, sample, reduce=reduce)
+        loss, ce_loss, rl_loss = self.compute_loss(model, net_output, sample, reduce=reduce)
         sample_size = sample['target'].size(0) if self.args.sentence_avg else sample['ntokens']
         logging_output = {
-            'reward': reward[0],
-            'baseline_reward': reward[1],
-            'loss': loss[0].data,
-            'ce_loss': loss[1].data,
-            'rl_loss': loss[2].data,
+            'loss': loss.data,
+            'ce_loss': ce_loss.data,
+            'rl_loss': rl_loss.data,
             'ntokens': sample['ntokens'],
             'nsentences': sample['target'].size(0),
             'sample_size': sample_size,
         }
-        return loss[0], sample_size, logging_output
+        return loss, sample_size, logging_output
 
     @staticmethod
     def add_args(parser):
@@ -93,7 +90,7 @@ class RLCrossEntropyCriterion(FairseqCriterion):
 
     def compute_loss(self, model, net_output, sample, reduce=True):
         ce_loss, _ = self.compute_ce_loss(model, net_output, sample, reduce=reduce)
-        rl_loss, reward = self.compute_rl_loss(model, net_output, sample, reduce=reduce)
+        rl_loss, _ = self.compute_rl_loss(model, net_output, sample, reduce=reduce)
 
         if self.args.mixier:
             epoch = metrics.get_meter("global", "epoch").val
@@ -104,28 +101,33 @@ class RLCrossEntropyCriterion(FairseqCriterion):
 
         loss = alpha * ce_loss + (1.0 - alpha) * rl_loss
 
-        return [loss, ce_loss, rl_loss], reward
+        return (loss, ce_loss, rl_loss)
 
-    def compute_rl_loss(self, model, net_output, sample, reduce=True):
-        # Generate baseline/samples
-        y_hat = self.sample_gen.generate([model], sample)
-        ref = sample['target']
-
-        ### rewords ###
-        y_hat_ = [y_hat_i_n['tokens'] for y_hat_i in y_hat for y_hat_i_n in y_hat_i]
-        y_hat_ = [" ".join([self.task.tgt_dict[t_i] for t_i in t]) for t in y_hat_]
-        src = [" ".join([self.task.src_dict[t_i] for t_i in t]) for t in sample['net_input']['src_tokens']]
+    def preprocess(self, src, y_hat):
+        # convert id to word
+        y_hat = [y_hat_i_n['tokens'] for y_hat_i in y_hat for y_hat_i_n in y_hat_i]
+        y_hat = [" ".join([self.task.tgt_dict[t_i] for t_i in t]) for t in y_hat]
+        src = [" ".join([self.task.src_dict[t_i] for t_i in t]) for t in src]
         # remove bpe
-        y_hat_ = [self.remove_bpe(s, '@@ ') for s in y_hat_]
+        y_hat = [self.remove_bpe(s, '@@ ') for s in y_hat]
         src = [self.remove_bpe(s, '@@ ') for s in src]
         # detokenize
         with MosesDetokenizer('en') as detokenize:
-            y_hat_ = [detokenize(s.split()) for s in y_hat_]
+            y_hat = [detokenize(s.split()) for s in y_hat]
             src = [detokenize(s.split()) for s in src]
         # Aligh src and pred
         src = [s for s in src for _ in range(self.n_sample)]
-        # r_hat = torch.tensor([[self.reword(ref_i, y_hat_i_n['tokens']) for y_hat_i_n in y_hat_i] for ref_i, y_hat_i in zip(ref, y_hat)])
-        r_hat = torch.tensor(self.bert_reward(y_hat_, src))
+
+        return y_hat, src
+        
+    def compute_rl_loss(self, model, net_output, sample, reduce=True):
+        # Generate baseline/samples
+        y_hat = self.sample_gen.generate([model], sample)
+        ref, src = sample['target'], sample['net_input']['src_tokens']
+
+        ### rewords ###
+        y_hat_, src = self.preprocess(src, y_hat)
+        r_hat = torch.tensor(self.bert_reward(src, y_hat_))
 
         if self.args.baseline_reward == "average":
             r_b = r_hat.mean(1, True)
@@ -167,7 +169,11 @@ class RLCrossEntropyCriterion(FairseqCriterion):
 
         loss = ((-scores * r_d) / self.n_sample).sum()
 
-        return loss, [r_hat.mean(), r_b.mean()]
+        # logging reward
+        metrics.log_scalar('reward', r_hat.mean(), round=3)
+        metrics.log_scalar('baseline_reward', r_b.mean(), round=3)
+
+        return loss, loss
 
     def compute_ce_loss(self, model, net_output, sample, reduce=True):
         lprobs = model.get_normalized_probs(net_output, log_probs=True)

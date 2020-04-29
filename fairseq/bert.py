@@ -4,16 +4,12 @@
 # LICENSE file in the root directory of this source tree.
 import os
 import torch
-from tqdm import tqdm
 import numpy as np
 
 # from transformers import *
 from transformers import (BertForSequenceClassification, BertTokenizer,
                           RobertaForSequenceClassification, RobertaTokenizer,
                           AlbertForSequenceClassification, AlbertTokenizer)
-from transformers import glue_convert_examples_to_features as convert_examples_to_features
-from transformers import glue_output_modes as output_modes
-from transformers import glue_processors as processors
 from transformers import InputExample, InputFeatures
 from torch.utils.data import (DataLoader, RandomSampler, SequentialSampler, TensorDataset)
 
@@ -121,19 +117,12 @@ class Scorer(object):
             final_score.append(
                 self.args.weight_g * g + self.args.weight_f * f + self.args.weight_m * m
             )
-        
-        # rehape (batch_size * sample_size)
-
 
         return torch.tensor(final_score).reshape(-1, self.args.criterion_sample_size)
 
-
     def predict(self, task):
         # Setup CUDA, GPU & distributed training
-        # device = torch.device("cuda" if torch.cuda.is_available() and not self.args.no_cuda else "cpu")
         device = torch.device("cuda")
-        # args.n_gpu = torch.cuda.device_count()
-        # args.device = device
 
         if task == "grammer":
             model = self.model_g
@@ -147,14 +136,13 @@ class Scorer(object):
 
         model.to(device)
 
-        # pred_bach_size = self.args.batch_size * max(1, self.args.n_gpu)
         pred_bach_size = self.args.bert_batch_size
         pred_sampler = SequentialSampler(pred_dataset)
         pred_dataloader = DataLoader(pred_dataset, sampler=pred_sampler, batch_size=pred_bach_size)
 
         preds = None
 
-        for batch in tqdm(pred_dataloader, desc="Predicting"):
+        for batch in pred_dataloader:
             model.eval()
             batch = tuple(t.to(device) for t in batch)
 
