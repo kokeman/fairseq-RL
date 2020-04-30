@@ -4,6 +4,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import math
+import logging
 
 import torch
 import torch.nn.functional as F
@@ -112,9 +113,11 @@ class RLBertCriterion(FairseqCriterion):
         y_hat = [self.remove_bpe(s, '@@ ') for s in y_hat]
         src = [self.remove_bpe(s, '@@ ') for s in src]
         # detokenize
+        logging.disable(logging.CRITICAL)
         with MosesDetokenizer('en') as detokenize:
             y_hat = [detokenize(s.split()) for s in y_hat]
             src = [detokenize(s.split()) for s in src]
+        logging.disable(logging.NOTSET)
         # Aligh src and pred
         src = [s for s in src for _ in range(self.n_sample)]
 
@@ -127,7 +130,7 @@ class RLBertCriterion(FairseqCriterion):
 
         ### rewords ###
         y_hat_, src = self.preprocess(src, y_hat)
-        r_hat = torch.tensor(self.bert_reward(src, y_hat_))
+        r_hat = self.bert_reward(src, y_hat_)
 
         if self.args.baseline_reward == "average":
             r_b = r_hat.mean(1, True)
@@ -170,8 +173,8 @@ class RLBertCriterion(FairseqCriterion):
         loss = ((-scores * r_d) / self.n_sample).sum()
 
         # logging reward
-        metrics.log_scalar('reward', r_hat.mean(), round=3)
-        metrics.log_scalar('baseline_reward', r_b.mean(), round=3)
+        metrics.log_scalar('reward', r_hat.mean().item())
+        metrics.log_scalar('baseline_reward', r_b.mean().item())
 
         return loss, loss
 
