@@ -4,7 +4,6 @@
 # LICENSE file in the root directory of this source tree.
 
 import math
-import logging
 
 import torch
 import torch.nn.functional as F
@@ -14,9 +13,7 @@ from fairseq import metrics, utils, search
 from fairseq.criterions import FairseqCriterion, register_criterion
 
 from fairseq.sequence_generator import SequenceGenerator
-from fairseq import bleu, bert
-
-from mosestokenizer import MosesDetokenizer
+from fairseq import bert
 
 @register_criterion('rl_bert')
 class RLBertCriterion(FairseqCriterion):
@@ -26,6 +23,7 @@ class RLBertCriterion(FairseqCriterion):
         self.n_sample = args.criterion_sample_size
         self.ce_weight = args.ce_weight
         self.pad = task.tgt_dict.pad()
+        self.eos = task.tgt_dict.eos()
         search_strategy = search.Sampling(task.tgt_dict) if args.search_strategy == "sampling" else None
         self.sample_gen = SequenceGenerator(task.tgt_dict, beam_size=self.n_sample, retain_dropout=True, search_strategy=search_strategy)
         self.greedy_gen = SequenceGenerator(task.tgt_dict, beam_size=1, retain_dropout=False)
@@ -79,15 +77,15 @@ class RLBertCriterion(FairseqCriterion):
         self.scorer.reset(one_init=True)
         self.scorer.add(ref.type(torch.IntTensor), pred.type(torch.IntTensor))
         return self.scorer.score()
-    
+
     def bert_reward(self, src, pred):
         self.scorer.add(src, pred)
         return self.scorer.score()
-        
+
     def remove_bpe(self, line, bpe_symbol):
         line = line.replace("\n", '')
         line = (line + ' ').replace(bpe_symbol, '').rstrip()
-        return line+("\n")
+        return line
 
     def compute_loss(self, model, net_output, sample, reduce=True):
         ce_loss, _ = self.compute_ce_loss(model, net_output, sample, reduce=reduce)
@@ -107,22 +105,16 @@ class RLBertCriterion(FairseqCriterion):
     def preprocess(self, src, y_hat):
         # convert id to word
         y_hat = [y_hat_i_n['tokens'] for y_hat_i in y_hat for y_hat_i_n in y_hat_i]
-        y_hat = [" ".join([self.task.tgt_dict[t_i] for t_i in t]) for t in y_hat]
-        src = [" ".join([self.task.src_dict[t_i] for t_i in t]) for t in src]
+        y_hat = [" ".join([self.task.tgt_dict[t_i] for t_i in t if t_i != self.eos]) for t in y_hat]
+        src = [" ".join([self.task.src_dict[t_i] for t_i in t if t_i != self.eos]) for t in src]
         # remove bpe
         y_hat = [self.remove_bpe(s, '@@ ') for s in y_hat]
         src = [self.remove_bpe(s, '@@ ') for s in src]
-        # detokenize
-        logging.disable(logging.CRITICAL)
-        with MosesDetokenizer('en') as detokenize:
-            y_hat = [detokenize(s.split()) for s in y_hat]
-            src = [detokenize(s.split()) for s in src]
-        logging.disable(logging.NOTSET)
         # Aligh src and pred
         src = [s for s in src for _ in range(self.n_sample)]
 
         return y_hat, src
-        
+
     def compute_rl_loss(self, model, net_output, sample, reduce=True):
         # Generate baseline/samples
         y_hat = self.sample_gen.generate([model], sample)
