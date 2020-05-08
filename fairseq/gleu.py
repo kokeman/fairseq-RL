@@ -3,13 +3,11 @@ from operator import mul
 from collections import defaultdict
 from functools import reduce
 
-import math
-from collections import Counter
 
 class SentenceGleu():
     """
-    Smoothed sentence-level GLEU as proposed by 
-    Napoles, Sakaguchi, Post, and Tetreault (2015). 
+    Smoothed sentence-level GLEU as proposed by
+    Napoles, Sakaguchi, Post, and Tetreault (2015).
 
     This is modified version by Yoshimura
     This resulting score is the same as https://github.com/cnap/gec-ranking/
@@ -49,7 +47,6 @@ class SentenceGleu():
 
         def ngram_precisions(src_ngrams, ref_ngrams, hyp_ngrams):
             precisions = []
-            # for n in [4]:
             for n in range(1, self.n + 1):
                 overlap = 0
                 for ref_ngram, ref_ngram_count in ref_ngrams[n - 1].items():
@@ -67,7 +64,7 @@ class SentenceGleu():
                 #     if src_ngram in hyp_ngrams[n - 1]:
                 #         penalty += min(src_ngram_count, hyp_ngrams[n - 1][src_ngram])
 
-                # modified (penalty is the overlap n-gram count 
+                # modified (penalty is the overlap n-gram count
                 #           not included in the reference but included in the source)
                 penalty = 0
                 for hyp_ngram, hyp_ngram_count in hyp_ngrams[n - 1].items():

@@ -61,20 +61,14 @@ class RLGleuCriterion(FairseqCriterion):
         parser.add_argument('--reward-clipping', action='store_true', default=False, help='if rewad is negative, reward is set to 0')
         parser.add_argument('--sent-bleu', action='store_true', default=False, help='if true, the reward bleu is normalized 0 ~ 1')
         parser.add_argument('--search-strategy', default="beam", help='sampling strategy (sampling or beam)')
-        parser.add_argument('--mixier', action='store_true', default=False, 
+        parser.add_argument('--mixier', action='store_true', default=False,
                                 help='Linearly reduce the ce-weight from --ce-weith to --min-ce-weight')
         parser.add_argument('--min-ce-weight', type=float, default=0.03)
         parser.add_argument('--rl-epoch-num', type=int, default=10, help="epoch num on rl")
 
     def reword(self, src, hyp, ref):
-        # self.scorer.add(src.type(torch.IntTensor), hyp.type(torch.IntTensor), ref.type(torch.IntTensor))
         self.scorer.add(src.tolist(), hyp.tolist(), ref.tolist())
         return self.scorer.score()
-        
-    def remove_bpe(self, line, bpe_symbol):
-        line = line.replace("\n", '')
-        line = (line + ' ').replace(bpe_symbol, '').rstrip()
-        return line+("\n")
 
     def compute_loss(self, model, net_output, sample, reduce=True):
         ce_loss, _ = self.compute_ce_loss(model, net_output, sample, reduce=reduce)
@@ -91,25 +85,6 @@ class RLGleuCriterion(FairseqCriterion):
 
         return (loss, ce_loss, rl_loss)
 
-    def preprocess(self, src, y_hat):
-        # convert id to word
-        y_hat = [y_hat_i_n['tokens'] for y_hat_i in y_hat for y_hat_i_n in y_hat_i]
-        y_hat = [" ".join([self.task.tgt_dict[t_i] for t_i in t]) for t in y_hat]
-        src = [" ".join([self.task.src_dict[t_i] for t_i in t]) for t in src]
-        # remove bpe
-        y_hat = [self.remove_bpe(s, '@@ ') for s in y_hat]
-        src = [self.remove_bpe(s, '@@ ') for s in src]
-        # detokenize
-        logging.disable(logging.CRITICAL)
-        with MosesDetokenizer('en') as detokenize:
-            y_hat = [detokenize(s.split()) for s in y_hat]
-            src = [detokenize(s.split()) for s in src]
-        logging.disable(logging.NOTSET)
-        # Aligh src and pred
-        src = [s for s in src for _ in range(self.n_sample)]
-
-        return y_hat, src
-        
     def compute_rl_loss(self, model, net_output, sample, reduce=True):
         # Generate baseline/samples
         y_hat = self.sample_gen.generate([model], sample)
